@@ -37,6 +37,8 @@ class Answer(BaseModel):
     text: str
     cost_usd: float
     retries: int = 0
+    confidence: float = 1.0
+    sources: list[str] = []
 
 
 class FakeLLMError(Exception):

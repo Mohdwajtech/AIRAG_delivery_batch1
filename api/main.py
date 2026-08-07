@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 # W2 pipeline — the underlying engine
 from src.pipeline.pipeline import ask_llm as _pipeline_ask_llm
+from src.pipeline.pipeline import stream_answer as _pipeline_stream
 from src.pipeline.pipeline import Question as _PipelineQuestion
 
 
@@ -39,10 +40,12 @@ class Question(BaseModel):
 
 
 class Answer(BaseModel):
-    """Public response shape — locked in ADR 0002."""
+    """Public response shape — locked in ADR 0002 (grown additively in W4)."""
     content: str
     cost_usd: float
     retries: int
+    confidence: float = 1.0
+    sources: list[str] = []
 
 
 app = FastAPI(
@@ -65,6 +68,8 @@ async def ask_batched(q: Question) -> Answer:
         content=pipeline_ans.text,
         cost_usd=pipeline_ans.cost_usd,
         retries=pipeline_ans.retries,
+        confidence=pipeline_ans.confidence,
+        sources=pipeline_ans.sources,
     )
 
 
@@ -79,25 +84,11 @@ async def health():
 # ─────────────────────────────────────────────────────────────────────────────
 # /ask — streaming endpoint (the contracted one)
 # ─────────────────────────────────────────────────────────────────────────────
-async def stream_answer(question_text: str):
-    """Async generator yielding the answer word-by-word.
-
-    W3 streams from FastAPI to the client; the pipeline call itself is still
-    non-streaming. In W4 the LLM call becomes a real stream end-to-end — this
-    generator's shape doesn't change, only what fills it.
-    """
-    pipeline_q = _PipelineQuestion(text=question_text)
-    pipeline_ans = await _pipeline_ask_llm(pipeline_q)
-    for word in pipeline_ans.text.split(" "):
-        yield word + " "
-        await asyncio.sleep(0.05)
-
-
 @app.post("/ask")
 async def ask(q: Question):
-    """Streaming /ask — the contracted endpoint."""
+    """Streaming /ask — now backed by the pipeline's REAL token stream (W4)."""
     log.info("ask  question=%r", q.question[:80])
     return StreamingResponse(
-        stream_answer(q.question),
+        _pipeline_stream(q.question),
         media_type="text/plain",
     )

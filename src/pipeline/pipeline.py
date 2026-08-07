@@ -49,10 +49,43 @@ else:
         text: str
 
     class Answer(BaseModel):
-        question: str
-        text:     str
-        cost_usd: float
-        retries:  int = 0
+        question:   str
+        text:       str
+        cost_usd:   float
+        retries:    int = 0
+        confidence: float = 1.0
+        sources:    list[str] = []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Structured-output tool schema (W4) — the shape we force the model to fill
+# ─────────────────────────────────────────────────────────────────────────────
+ANSWER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "answer_question",
+        "description": "Return a structured answer with content, confidence, and sources.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content":    {"type": "string"},
+                "confidence": {"type": "number"},
+                "sources":    {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["content", "confidence", "sources"],
+        },
+    },
+}
+
+
+def estimate_prompt_tokens(text: str, model: str = "gpt-4o-mini") -> int:
+    """tiktoken guardrail: count prompt tokens locally BEFORE calling."""
+    try:
+        import tiktoken
+        enc = tiktoken.encoding_for_model(model)
+        return len(enc.encode(text))
+    except Exception:
+        return max(1, len(text) // 4)   # rough fallback if tiktoken/encoding unavailable
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,14 +106,27 @@ async def ask_llm(q: Question, fail_rate: float = 0.0) -> Answer:
     if _settings_for_import.use_fake:
         ans = await fake_ask_llm(q, fail_rate=fail_rate)
     else:
-        resp = await _client.chat.completions.create(
-            model=_settings_for_import.model,
+        from .cost import compute_cost_usd
+        model = _settings_for_import.model
+        est = estimate_prompt_tokens(q.text, model)         # tiktoken: estimate BEFORE the call
+        log.info(f"~{est} prompt tokens (tiktoken estimate)")
+
+        resp = await _client.chat.completions.create(        # structured output via tool-calling
+            model=model,
             messages=[{"role": "user", "content": q.text}],
+            tools=[ANSWER_TOOL],
+            tool_choice={"type": "function", "function": {"name": "answer_question"}},
         )
+        if resp.choices[0].finish_reason == "length":        # API-response study: truncation guard
+            log.warning("answer truncated (finish_reason=length)")
+        args = json.loads(resp.choices[0].message.tool_calls[0].function.arguments)
+        u = resp.usage                                       # real cost from response.usage
         ans = Answer(
             question=q.text,
-            text=resp.choices[0].message.content,
-            cost_usd=0.0001,                  # real cost-from-usage lands in W25
+            text=args["content"],
+            cost_usd=compute_cost_usd(model, u.prompt_tokens, u.completion_tokens),
+            confidence=args["confidence"],
+            sources=args.get("sources", []),
         )
     log.info(f"asked: {q.text[:40]}")
     return ans
@@ -160,6 +206,29 @@ def summarise_run(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Real streaming (W4) — fake path simulates; real path streams delta.content
+# ─────────────────────────────────────────────────────────────────────────────
+async def stream_answer(question_text: str):
+    """Async generator yielding the answer in pieces."""
+    if _settings_for_import.use_fake:                        # FLOW: simulate from the fake answer
+        ans = await ask_llm(Question(text=question_text))
+        for word in ans.text.split(" "):
+            yield word + " "
+            await asyncio.sleep(0.05)
+        return
+    stream = await _client.chat.completions.create(          # QUALITY: real token stream
+        model=_settings_for_import.model,
+        messages=[{"role": "user", "content": question_text}],
+        stream=True,
+    )
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        if chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entrypoint
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -204,5 +273,5 @@ if __name__ == "__main__":
     from .store import connect, write_run, write_answers
     with connect(settings.results_db) as con:
         run_id = write_run(con, summary)
-        n      = write_answers(con, run_id, answers)
+        n      = write_answers(con, run_id, answers, model=settings.model)
     log.info(f"persisted run {run_id} with {n} answers to {settings.results_db}")
