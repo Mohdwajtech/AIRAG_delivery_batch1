@@ -1,8 +1,9 @@
 """Tiny SQLite persistence — two tables, one writer per table.
 
 Schema:
-  runs    — one row per pipeline execution (mirrors RunSummary fields)
-  answers — one row per LLM call, FK-linked to runs.id
+  runs      — one row per pipeline execution (mirrors RunSummary fields)
+  answers   — one row per LLM call, FK-linked to runs.id
+  eval_runs — one row per judged answer (Week 5 evaluation harness)
 """
 from __future__ import annotations
 import sqlite3
@@ -39,6 +40,19 @@ CREATE TABLE IF NOT EXISTS answers (
     sources_json TEXT,                                      -- W4: JSON-encoded sources list
     ts           REAL    NOT NULL,
     FOREIGN KEY (run_id) REFERENCES runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       INTEGER NOT NULL,                          -- groups one eval run
+    golden_id    TEXT,                                      -- which golden entry
+    question     TEXT,
+    candidate    TEXT,                                      -- the answer that was judged
+    accuracy     INTEGER,
+    groundedness INTEGER,
+    format       INTEGER,
+    reasoning    TEXT,
+    ts           REAL    NOT NULL
 );
 """
 
@@ -95,3 +109,23 @@ def write_answers(
     )
     con.commit()
     return len(rows)
+
+
+def write_eval_run(
+    con: sqlite3.Connection,
+    run_id: int,
+    golden_id: str,
+    question: str,
+    candidate: str,
+    scores: dict,
+) -> None:
+    """Insert one judged answer into `eval_runs` (Week 5)."""
+    con.execute(
+        "INSERT INTO eval_runs (run_id, golden_id, question, candidate, "
+        "                       accuracy, groundedness, format, reasoning, ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, golden_id, question, candidate,
+         scores.get("accuracy"), scores.get("groundedness"),
+         scores.get("format"), scores.get("reasoning"), time.time()),
+    )
+    con.commit()
