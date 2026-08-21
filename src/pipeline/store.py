@@ -4,6 +4,7 @@ Schema:
   runs      — one row per pipeline execution (mirrors RunSummary fields)
   answers   — one row per LLM call, FK-linked to runs.id
   eval_runs — one row per judged answer (Week 5 evaluation harness)
+  rag_runs  — one row per RAG answer over the golden set (Week 6)
 """
 from __future__ import annotations
 import sqlite3
@@ -52,6 +53,19 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     groundedness INTEGER,
     format       INTEGER,
     reasoning    TEXT,
+    ts           REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rag_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       INTEGER NOT NULL,                          -- groups one RAG eval run
+    golden_id    TEXT,
+    question     TEXT,
+    answer       TEXT,
+    sources_json TEXT,                                      -- retrieved chunk ids
+    hit          INTEGER,                                   -- retrieval hit: expected source in top-k (0/1)
+    latency_ms   REAL,
+    cost_usd     REAL,
     ts           REAL    NOT NULL
 );
 """
@@ -127,5 +141,28 @@ def write_eval_run(
         (run_id, golden_id, question, candidate,
          scores.get("accuracy"), scores.get("groundedness"),
          scores.get("format"), scores.get("reasoning"), time.time()),
+    )
+    con.commit()
+
+
+def write_rag_run(
+    con: sqlite3.Connection,
+    run_id: int,
+    golden_id: str,
+    question: str,
+    answer: str,
+    sources: list[str],
+    hit: int,
+    latency_ms: float,
+    cost_usd: float,
+) -> None:
+    """Insert one RAG answer over the golden set into `rag_runs` (Week 6)."""
+    import json
+    con.execute(
+        "INSERT INTO rag_runs (run_id, golden_id, question, answer, sources_json, "
+        "                      hit, latency_ms, cost_usd, ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, golden_id, question, answer, json.dumps(sources),
+         hit, latency_ms, cost_usd, time.time()),
     )
     con.commit()

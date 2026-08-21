@@ -101,19 +101,42 @@ def load_questions(path: str | Path = "data/questions.csv") -> list[Question]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Core LLM calls
 # ─────────────────────────────────────────────────────────────────────────────
-async def ask_llm(q: Question, fail_rate: float = 0.0) -> Answer:
-    """One LLM call. Branches on Settings.use_fake."""
+async def ask_llm(
+    q: Question,
+    fail_rate: float = 0.0,
+    context: str | None = None,          # W6: retrieved chunks (RAG). None -> answer from training data.
+    sources: list[str] | None = None,    # W6: real chunk ids to record on the Answer.
+) -> Answer:
+    """One LLM call. Branches on Settings.use_fake.
+
+    W6 (Option B): when `context` is supplied, the model is told to answer ONLY
+    from that context and cite sources; `sources` (the retrieved chunk ids) are
+    written onto the returned Answer.
+    """
     if _settings_for_import.use_fake:
         ans = await fake_ask_llm(q, fail_rate=fail_rate)
+        if sources is not None:
+            ans.sources = sources                            # record real retrieved ids
     else:
         from .cost import compute_cost_usd
         model = _settings_for_import.model
-        est = estimate_prompt_tokens(q.text, model)         # tiktoken: estimate BEFORE the call
+
+        if context:                                          # W6: grounded RAG prompt
+            user_content = (
+                "Answer the question using ONLY the context below. If the context "
+                "does not contain the answer, say you don't have enough information. "
+                "Cite the source id in square brackets after any fact you use.\n\n"
+                f"Context:\n{context}\n\nQuestion: {q.text}"
+            )
+        else:                                                # pre-W6 behaviour, unchanged
+            user_content = q.text
+
+        est = estimate_prompt_tokens(user_content, model)   # tiktoken: estimate BEFORE the call
         log.info(f"~{est} prompt tokens (tiktoken estimate)")
 
         resp = await _client.chat.completions.create(        # structured output via tool-calling
             model=model,
-            messages=[{"role": "user", "content": q.text}],
+            messages=[{"role": "user", "content": user_content}],
             tools=[ANSWER_TOOL],
             tool_choice={"type": "function", "function": {"name": "answer_question"}},
         )
@@ -126,7 +149,7 @@ async def ask_llm(q: Question, fail_rate: float = 0.0) -> Answer:
             text=args["content"],
             cost_usd=compute_cost_usd(model, u.prompt_tokens, u.completion_tokens),
             confidence=args["confidence"],
-            sources=args.get("sources", []),
+            sources=sources if sources is not None else args.get("sources", []),  # W6: real ids win
         )
     log.info(f"asked: {q.text[:40]}")
     return ans

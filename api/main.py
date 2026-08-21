@@ -24,6 +24,15 @@ from src.pipeline.pipeline import ask_llm as _pipeline_ask_llm
 from src.pipeline.pipeline import stream_answer as _pipeline_stream
 from src.pipeline.pipeline import Question as _PipelineQuestion
 
+# W6: naive RAG retrieval. Load the index once at startup; if it's missing
+# (not built yet), fall back to answering from training data.
+try:
+    from src.rag.naive_rag import load_index, retrieve
+    _RAG_INDEX = load_index()
+    logging.getLogger(__name__).info("RAG index loaded: %d chunks", len(_RAG_INDEX))
+except Exception as _e:  # index not built yet -> app still works, just ungrounded
+    _RAG_INDEX = None
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
@@ -63,7 +72,14 @@ async def ask_batched(q: Question) -> Answer:
     """Non-streaming. Returns the full Answer in a single JSON body."""
     log.info("ask_batched  question=%r", q.question[:80])
     pipeline_q = _PipelineQuestion(text=q.question)
-    pipeline_ans = await _pipeline_ask_llm(pipeline_q)
+
+    context, sources = None, None
+    if _RAG_INDEX:                                    # W6: retrieve before answering
+        hits = retrieve(q.question, _RAG_INDEX, k=3)
+        context = "\n\n".join(f"[{h['chunk_id']}]\n{h['text']}" for h in hits)
+        sources = [h["chunk_id"] for h in hits]
+
+    pipeline_ans = await _pipeline_ask_llm(pipeline_q, context=context, sources=sources)
     return Answer(
         content=pipeline_ans.text,
         cost_usd=pipeline_ans.cost_usd,

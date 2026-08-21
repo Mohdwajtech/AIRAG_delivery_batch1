@@ -8,6 +8,8 @@ Prereqs: API running + OPENAI_API_KEY (or USE_FAKE=1 for an offline dry run).
 Usage:   python scripts/run_critic_creator.py
 """
 from __future__ import annotations
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import httpx
 
 from src.eval.golden import load_golden
