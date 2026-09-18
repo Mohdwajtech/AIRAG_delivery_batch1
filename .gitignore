@@ -14,5 +14,11 @@ logs/
 *.db
 results.json
 
+# W7+ — Embedding cache (regenerable, potentially large)
+data/embed_cache/
+
+# W8+ — Sample generated docs (regenerable via generate_sample_docs.py)
+# practice_examples/week08/sample_docs/
+
 # OS
 .DS_Store
