@@ -509,3 +509,107 @@ def ingest_corpus(
     print(f"  ✓ Embed cost:       ${result['cost_usd']:.4f}")
 
     return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# KB Lifecycle — Tombstones + Versioning (W10)
+# ═══════════════════════════════════════════════════════════════
+
+KB_VERSION = "v2.w10"
+
+
+def tombstone_source(
+    source_id: str,
+    client=None,
+    collection: str = "capstone_chunks_v2",
+) -> int:
+    """Soft-delete all chunks from a source by setting deleted_at timestamp.
+
+    Does NOT remove data — marks it as deleted. Tombstoned chunks:
+    - Are filtered out of retrieval by _live_filter()
+    - Remain queryable for audit (with include_deleted=True)
+    - Can be rolled back by clearing deleted_at
+
+    Call cache.clear() AFTER this — non-negotiable.
+    """
+    from datetime import datetime, timezone
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+    if client is None:
+        from src.rag.qdrant_store import get_qdrant_client
+        client = get_qdrant_client()
+
+    # Find all chunks belonging to this source
+    hits, _ = client.scroll(
+        collection_name=collection,
+        scroll_filter=Filter(must=[
+            FieldCondition(key="source_id", match=MatchValue(value=source_id))
+        ]),
+        limit=10000,
+    )
+
+    if not hits:
+        print(f"  tombstone: no chunks found for source_id={source_id!r}")
+        return 0
+
+    # Set deleted_at on each chunk (soft delete)
+    now = datetime.now(timezone.utc).isoformat()
+    from qdrant_client.models import SetPayloadOperation, SetPayload, PointIdsList
+    client.set_payload(
+        collection_name=collection,
+        payload={"deleted_at": now},
+        points=[h.id for h in hits],
+    )
+
+    print(f"  tombstone: marked {len(hits)} chunks as deleted (source={source_id})")
+    return len(hits)
+
+
+def ingest_or_update_source(
+    path: Path,
+    source_id: str,
+    client=None,
+    collection: str = "capstone_chunks_v2",
+    embedding_model: str = "text-embedding-3-small",
+) -> dict:
+    """Ingest a document, tombstoning any previous version first.
+
+    This is the SAFE way to update a document:
+    1. Tombstone old chunks (soft delete)
+    2. Parse + chunk + scrub the new version
+    3. Upsert new chunks
+    4. Caller must clear the cache after this (non-negotiable)
+
+    On first ingest (no previous chunks), the tombstone step is a no-op.
+    """
+    if client is None:
+        from src.rag.qdrant_store import get_qdrant_client
+        client = get_qdrant_client()
+
+    # Step 1: Tombstone old version (no-op if first ingest)
+    tombstoned = tombstone_source(source_id, client, collection)
+
+    # Step 2: Parse + chunk + scrub
+    doc = parse_document(path)
+    chunks = chunk_document(doc)
+    chunks = scrub_chunks(chunks)
+    chunks = finalize_metadata(chunks)
+
+    # Tag each chunk with source_id for future tombstoning
+    for c in chunks:
+        c.metadata["source_id"] = source_id
+
+    # Step 3: Embed + upsert
+    from src.rag.qdrant_store import embed_texts, upsert_chunks
+    texts = [c.text for c in chunks]
+    vectors = embed_texts(texts, model=embedding_model)
+    chunk_dicts = [{**c.metadata, "text": c.text} for c in chunks]
+    upsert_chunks(client, chunk_dicts, vectors, collection=collection)
+
+    print(f"  update: tombstoned {tombstoned} old → ingested {len(chunks)} new (source={source_id})")
+    return {
+        "source_id": source_id,
+        "tombstoned": tombstoned,
+        "ingested": len(chunks),
+        "action": "update" if tombstoned > 0 else "first_ingest",
+    }

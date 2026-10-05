@@ -209,6 +209,32 @@ except Exception as e:
     check("cache.py imports", False, str(e))
 
 
+# ── W10 Tombstones + KB Lifecycle ─────────────────────────────
+
+section("W10: Tombstones + KB Lifecycle")
+
+try:
+    from src.ingest.pipeline import (
+        tombstone_source, ingest_or_update_source, KB_VERSION,
+    )
+    check("tombstone_source() defined", callable(tombstone_source))
+    check("ingest_or_update_source() defined", callable(ingest_or_update_source))
+    check(f"KB_VERSION = '{KB_VERSION}'", KB_VERSION == "v2.w10")
+
+    from src.rag.retrieval import _live_filter
+    check("_live_filter() defined in retrieval.py", callable(_live_filter))
+
+    # Test _live_filter produces a Filter object
+    f = _live_filter()
+    check("_live_filter() returns a Filter", f is not None and hasattr(f, "must"))
+    check("Filter uses IsEmptyCondition (not IsNull)", "IsEmpty" in str(type(f.must[0])))
+
+except ImportError as e:
+    check("tombstone imports", False, f"ImportError: {e} — install qdrant-client for full check")
+except Exception as e:
+    check("tombstone logic", False, str(e))
+
+
 # ══════════════════════════════════════════════════════════════
 # W11 — RAGAS Metrics (Offline Proxy)
 # ══════════════════════════════════════════════════════════════

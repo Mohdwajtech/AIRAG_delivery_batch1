@@ -18,6 +18,35 @@ Design:
 """
 from __future__ import annotations
 
+# ═══════════════════════════════════════════════════════════════
+# W10: Tombstone-aware live filter
+# ═══════════════════════════════════════════════════════════════
+
+def _live_filter(extra_filter=None):
+    """Build a Qdrant filter that excludes tombstoned chunks (deleted_at IS EMPTY).
+
+    Uses IsEmptyCondition (NOT IsNullCondition) — the W10 silent-bug lesson.
+    IsNullCondition checks for explicit null values. IsEmptyCondition checks for
+    the ABSENCE of the field entirely, which is what un-tombstoned chunks have
+    (they never had a deleted_at field set). Using IsNull would miss chunks that
+    were never tombstoned (because null ≠ absent).
+
+    Pass extra_filter to combine with additional conditions (e.g., source_id match).
+    """
+    from qdrant_client.models import Filter, IsEmptyCondition, PayloadField
+
+    tombstone_filter = Filter(
+        must=[IsEmptyCondition(is_empty=PayloadField(key="deleted_at"))]
+    )
+
+    if extra_filter is None:
+        return tombstone_filter
+
+    # Combine: tombstone filter + caller's filter
+    combined_must = list(tombstone_filter.must or [])
+    combined_must.extend(extra_filter.must or [])
+    return Filter(must=combined_must)
+
 import re
 from typing import Optional
 
@@ -110,24 +139,35 @@ def rrf_fuse(
     ranked_lists: list[list[dict]],
     k: int = 60,
     top_n: int = 10,
+    weights: list[float] | None = None,
 ) -> list[dict]:
-    """Fuse multiple ranked result lists via Reciprocal Rank Fusion.
+    """Fuse multiple ranked result lists via Weighted Reciprocal Rank Fusion.
 
-    RRF formula: score(doc) = Σ 1/(k + rank_in_list)
+    RRF formula: score(doc) = Σ  weight_i × 1/(k + rank_in_list_i)
       - k=60 is the Cormack et al. (2009) default
       - Uses RANK position, not raw scores → no scale mismatch
-      - A document appearing in BOTH lists scores ~2× one that's in only one
+      - weights controls how much each list contributes to the fused score
+        Default: equal weight (1.0 each) — standard unweighted RRF
+        Example: weights=[0.7, 0.3] → dense=70%, BM25=30%
 
     Each ranked_list contains dicts with 'id' key. Additional fields
     are preserved from whichever list the doc first appeared in.
     """
+    if weights is None:
+        weights = [1.0] * len(ranked_lists)
+
+    if len(weights) != len(ranked_lists):
+        raise ValueError(
+            f"weights length ({len(weights)}) must match ranked_lists length ({len(ranked_lists)})"
+        )
+
     scores: dict[str, float] = {}
     docs: dict[str, dict] = {}
 
-    for ranked in ranked_lists:
+    for weight, ranked in zip(weights, ranked_lists):
         for rank, hit in enumerate(ranked, start=1):
             doc_id = str(hit.get("id", ""))
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+            scores[doc_id] = scores.get(doc_id, 0.0) + weight * 1.0 / (k + rank)
             if doc_id not in docs:
                 docs[doc_id] = hit
 
@@ -150,11 +190,20 @@ def dense_retrieve(
     k: int = 3,
     model: str = "text-embedding-3-small",
     query_filter=None,
+    include_deleted: bool = False,
 ) -> list[dict]:
-    """Pure dense retrieval via Qdrant. This is the W8 baseline."""
+    """Pure dense retrieval via Qdrant. This is the W8 baseline.
+
+    By default, tombstoned chunks (deleted_at set) are excluded via _live_filter().
+    Pass include_deleted=True for audit/forensic queries.
+    """
     from src.rag.qdrant_store import embed_one
 
     q_vec = embed_one(query, model=model)
+
+    # W10: apply tombstone filter unless explicitly including deleted chunks
+    if not include_deleted:
+        query_filter = _live_filter(extra_filter=query_filter)
 
     hits = client.query_points(
         collection_name=collection,
@@ -187,8 +236,9 @@ def hybrid_retrieve(
     model: str = "text-embedding-3-small",
     query_filter=None,
     doc_filter: Optional[dict] = None,
+    dense_weight: float = 0.7,
 ) -> list[dict]:
-    """BM25 + Dense + RRF fusion.
+    """BM25 + Dense + RRF fusion with configurable weighting.
 
     Args:
         query: user's question
@@ -199,17 +249,28 @@ def hybrid_retrieve(
         model: embedding model for dense retrieval
         query_filter: Qdrant filter object (for dense retrieval)
         doc_filter: dict filter (for BM25 pre-filtering)
+        dense_weight: how much weight dense retrieval gets (0.0–1.0).
+            BM25 weight is (1 - dense_weight). Default 0.7 means dense=70%,
+            BM25=30%. At 0.5 both are equal (standard unweighted RRF).
+            Tuned against golden set in W9: 0.7 gave best F1.
 
     Returns:
-        top k_final results after RRF fusion
+        top k_final results after weighted RRF fusion
     """
+    bm25_weight = round(1.0 - dense_weight, 4)
+
     bm25_hits = bm25_search(query, k=k_per, doc_filter=doc_filter)
     dense_hits = dense_retrieve(
         query, client, collection=collection,
         k=k_per, model=model, query_filter=query_filter,
     )
 
-    return rrf_fuse([bm25_hits, dense_hits], k=60, top_n=k_final)
+    return rrf_fuse(
+        [bm25_hits, dense_hits],
+        k=60,
+        top_n=k_final,
+        weights=[bm25_weight, dense_weight],
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
