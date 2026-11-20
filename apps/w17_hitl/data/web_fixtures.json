@@ -1,0 +1,18 @@
+{
+  "ai agents": [
+    {"title": "State of AI Agents 2026", "snippet": "Agentic systems moved from demos to production in 2026, with tool-use reliability the key differentiator."},
+    {"title": "Agent frameworks roundup", "snippet": "Raw loops and graph-based orchestration remain the two dominant patterns."}
+  ],
+  "openai api": [
+    {"title": "OpenAI API pricing", "snippet": "gpt-4o-mini is positioned as the low-cost tier for high-volume workloads."}
+  ],
+  "cricket": [
+    {"title": "Cricket World Cup", "snippet": "The most recent tournament concluded with a closely contested final."}
+  ],
+  "python libraries": [
+    {"title": "Trending Python libraries", "snippet": "Data, LLM-tooling, and async libraries dominate 2026 trending lists."}
+  ],
+  "_default": [
+    {"title": "Web result", "snippet": "A relevant public-web snippet would appear here."}
+  ]
+}
