@@ -29,5 +29,13 @@ rank-bm25>=0.2
 # ragas>=0.1.0
 # datasets>=2.16
 
+# Agent orchestration (W16-W17)
+langgraph>=1.0,<2
+
+# Streaming UI (W17) — for apps/w17_hitl
+streamlit>=1.30.0
+requests>=2.31.0
+pandas>=2.0.0
+
 # Testing
 pytest>=7.0
